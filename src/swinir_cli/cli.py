@@ -15,6 +15,7 @@ from swinir_cli.swinir.network_swinir_mlx import SwinIR
 
 
 MODEL_RELEASE_BASE = "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0"
+MODEL_MEDIUM_X2 = "003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x2_GAN.pth"
 MODEL_MEDIUM_X4 = "003_realSR_BSRGAN_DFO_s64w8_SwinIR-M_x4_GAN.pth"
 MODEL_LARGE_X4 = "003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR-L_x4_GAN.pth"
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -24,6 +25,7 @@ IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 class ModelSpec:
     filename: str
     large: bool
+    scale: int
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output,
             model_dir=args.model_dir,
             large_model=args.large_model,
+            scale=args.scale,
             device_name=args.device,
             tile=args.tile,
             tile_overlap=args.tile_overlap,
@@ -54,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="swinir-upscale",
-        description="Upscale an image or folder of images with SwinIR real-world x4 super-resolution.",
+        description="Upscale an image or folder of images with SwinIR real-world super-resolution.",
     )
     parser.add_argument("input", type=Path, help="Image file or directory to upscale.")
     parser.add_argument(
@@ -74,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--large-model",
         action="store_true",
         help="Use the larger SwinIR-L x4 GAN model. It is slower and uses more memory.",
+    )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        choices=(2, 4),
+        default=4,
+        help="Upscale factor. x2 is available for the medium model; x4 remains the default.",
     )
     parser.add_argument(
         "--device",
@@ -106,6 +116,7 @@ def upscale(
     output_dir: Path,
     model_dir: Path,
     large_model: bool,
+    scale: int,
     device_name: str,
     tile: int,
     tile_overlap: int,
@@ -126,7 +137,7 @@ def upscale(
     model_dir.mkdir(parents=True, exist_ok=True)
 
     device = pick_device(device_name)
-    spec = ModelSpec(MODEL_LARGE_X4, large=True) if large_model else ModelSpec(MODEL_MEDIUM_X4, large=False)
+    spec = select_model(large_model=large_model, scale=scale)
     model_path = ensure_mlx_model(model_dir, spec)
 
     print(f"Using device: {device}")
@@ -134,14 +145,28 @@ def upscale(
     model = load_model(spec, model_path)
 
     for path in image_paths:
-        target = output_dir / f"{path.stem}_swinir_x4.png"
+        target = output_dir / f"{path.stem}_swinir_x{spec.scale}.png"
         if target.exists() and not overwrite:
             print(f"Skipping existing output: {target}")
             continue
 
         print(f"Upscaling {path} -> {target}")
-        result = upscale_image(path, model, device, tile=None if tile == 0 else tile, tile_overlap=tile_overlap)
+        result = upscale_image(path, model, device, scale=spec.scale, tile=None if tile == 0 else tile, tile_overlap=tile_overlap)
         result.save(target)
+
+
+def select_model(large_model: bool, scale: int) -> ModelSpec:
+    if large_model:
+        if scale != 4:
+            raise ValueError("--large-model is only available with --scale 4; upstream does not provide a real-world SwinIR-L x2 GAN checkpoint")
+        return ModelSpec(MODEL_LARGE_X4, large=True, scale=4)
+
+    if scale == 2:
+        return ModelSpec(MODEL_MEDIUM_X2, large=False, scale=2)
+    if scale == 4:
+        return ModelSpec(MODEL_MEDIUM_X4, large=False, scale=4)
+
+    raise ValueError(f"unsupported scale: {scale}")
 
 
 def resolve_images(input_path: Path) -> Iterable[Path]:
@@ -206,7 +231,7 @@ def ensure_torch_model(model_dir: Path, filename: str) -> Path:
 def build_model(spec: ModelSpec) -> SwinIR:
     if spec.large:
         return SwinIR(
-            upscale=4,
+            upscale=spec.scale,
             in_chans=3,
             img_size=64,
             window_size=8,
@@ -220,7 +245,7 @@ def build_model(spec: ModelSpec) -> SwinIR:
         )
 
     return SwinIR(
-        upscale=4,
+        upscale=spec.scale,
         in_chans=3,
         img_size=64,
         window_size=8,
@@ -294,7 +319,7 @@ def flatten_parameters(tree: object, prefix: str = "") -> dict[str, mx.array]:
     return {}
 
 
-def upscale_image(path: Path, model: SwinIR, device: mx.Device, tile: int | None, tile_overlap: int) -> Image.Image:
+def upscale_image(path: Path, model: SwinIR, device: mx.Device, scale: int, tile: int | None, tile_overlap: int) -> Image.Image:
     del device
     image = Image.open(path).convert("RGB")
     image_np = np.asarray(image).astype(np.float32) / 255.0
@@ -305,8 +330,8 @@ def upscale_image(path: Path, model: SwinIR, device: mx.Device, tile: int | None
     image_np = np.concatenate([image_np, np.flip(image_np, axis=1)], axis=1)[:, : w_old + w_pad, :]
 
     tensor = mx.array(image_np[None, ...])
-    output = run_model(tensor, model, scale=4, tile=tile, tile_overlap=tile_overlap)
-    output = output[:, : h_old * 4, : w_old * 4, :]
+    output = run_model(tensor, model, scale=scale, tile=tile, tile_overlap=tile_overlap)
+    output = output[:, : h_old * scale, : w_old * scale, :]
 
     mx.eval(output)
     output_np = np.clip(np.array(output[0]), 0, 1)
