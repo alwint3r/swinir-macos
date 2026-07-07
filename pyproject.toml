@@ -1,0 +1,20 @@
+[project]
+name = "swinir-cli"
+version = "0.1.0"
+description = "Small macOS-friendly CLI for upscaling images with SwinIR."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "pillow>=10.0",
+  "requests>=2.31",
+  "timm>=0.9",
+  "torch>=2.3",
+]
+
+[project.scripts]
+swinir-upscale = "swinir_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9.0"]
+build-backend = "uv_build"

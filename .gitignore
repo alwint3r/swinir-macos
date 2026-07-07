@@ -1,0 +1,7 @@
+.venv/
+models/
+out/
+sample.png
+__pycache__/
+*.py[cod]
+*.DS_Store
